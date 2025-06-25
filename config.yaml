@@ -4,8 +4,8 @@ db_path: GeoLite2-ASN.mmdb
 # log_file: tracer.log  # Log file location
 targets:
   - host: 1.1.1.1  # Cloudflare DNS
-    schedule: "@every 300s"
-  - host: api.sandbox.push.apple.com # Apple APN
-    schedule: "@every 300s"
-  - host: 8.8.8.8  # Google DNS
-    schedule: "@every 300s"
+    schedule: "@every 900s"
+  - host: api.sandbox.push.apple.com  # Apple APN
+    schedule: "@every 900s"
+  - host: google.com  # Google Web
+    schedule: "@every 900s"

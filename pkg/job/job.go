@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -11,11 +12,12 @@ import (
 
 // MTRJob runs MTR and collects metrics.
 type MTRJob struct {
-	runner   *mtr.Runner
-	metrics  *mtr.Collector
-	reports  []mtr.Report
-	duration time.Duration
-	target   string
+	runner          *mtr.Runner
+	metrics         *mtr.Collector
+	reports         []mtr.Report
+	duration        time.Duration
+	target          string
+	lastHopSequence []string
 }
 
 // NewMTRJob creates a new MTR job with ASN lookup function.
@@ -58,6 +60,22 @@ func (j *MTRJob) Run(ctx context.Context) error {
 		j.reports = j.reports[:10]
 	}
 
+	// Check route change
+	currentHopSequence := make([]string, len(report.Hops))
+	for i, hop := range report.Hops {
+		currentHopSequence[i] = hop.Host
+	}
+	routeChanged := "false"
+	if len(j.lastHopSequence) > 0 && !equalHopSequences(j.lastHopSequence, currentHopSequence) {
+		routeChanged = "true"
+	}
+	j.lastHopSequence = currentHopSequence
+
+	// Calculate hop count variance
+	hopCountVariance := calculateHopCountVariance(j.reports)
+	// Calculate latency jitter
+	latencyJitter := calculateLatencyJitter(j.reports)
+
 	j.metrics.Reset()
 	var totalPackets int
 	var totalLoss float64
@@ -89,6 +107,69 @@ func (j *MTRJob) Run(ctx context.Context) error {
 	j.metrics.ReportHops.WithLabelValues(j.target).Set(float64(len(report.Hops)))
 	j.metrics.ReportLoss.WithLabelValues(j.target).Set(totalLoss / float64(len(report.Hops)))
 	j.metrics.ReportPackets.WithLabelValues(j.target).Set(float64(totalPackets))
+	// Set route volatility metric
+	j.metrics.RouteVolatility.WithLabelValues(
+		j.target,
+		routeChanged,
+		fmt.Sprintf("%.2f", hopCountVariance),
+		fmt.Sprintf("%.2f", latencyJitter),
+	).Set(1)
 
 	return nil
+}
+
+// equalHopSequences compares two hop sequences for equality.
+func equalHopSequences(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// calculateHopCountVariance computes the variance of hop counts across reports.
+func calculateHopCountVariance(reports []mtr.Report) float64 {
+	if len(reports) < 2 {
+		return 0
+	}
+	var sum, mean float64
+	n := float64(len(reports))
+	for _, report := range reports {
+		hopCount := float64(len(report.Hops))
+		sum += hopCount
+	}
+	mean = sum / n
+	var variance float64
+	for _, report := range reports {
+		hopCount := float64(len(report.Hops))
+		variance += (hopCount - mean) * (hopCount - mean)
+	}
+	return variance / n
+}
+
+// calculateLatencyJitter computes the average variance of Avg latency across hops in consecutive reports.
+func calculateLatencyJitter(reports []mtr.Report) float64 {
+	if len(reports) < 2 {
+		return 0
+	}
+	current := reports[0]
+	previous := reports[1]
+	var sum, count float64
+	for _, currHop := range current.Hops {
+		for _, prevHop := range previous.Hops {
+			if currHop.Host == prevHop.Host && currHop.Host != "" && currHop.Host != "???" {
+				diff := currHop.Avg - prevHop.Avg
+				sum += diff * diff
+				count++
+			}
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / count
 }

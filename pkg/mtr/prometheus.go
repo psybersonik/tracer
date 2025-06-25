@@ -13,17 +13,18 @@ type Hub struct {
 }
 
 type Collector struct {
-	HopLossRatio  *prometheus.GaugeVec
-	HopSentTotal  *prometheus.CounterVec
-	HopLastMs     *prometheus.GaugeVec
-	HopAvgMs      *prometheus.GaugeVec
-	HopBestMs     *prometheus.GaugeVec
-	HopWorstMs    *prometheus.GaugeVec
-	HopStddevMs   *prometheus.GaugeVec
-	ReportMs      *prometheus.GaugeVec // Changed to GaugeVec
-	ReportHops    *prometheus.GaugeVec // Changed to GaugeVec
-	ReportLoss    *prometheus.GaugeVec // Changed to GaugeVec
-	ReportPackets *prometheus.GaugeVec // Changed to GaugeVec
+	HopLossRatio    *prometheus.GaugeVec
+	HopSentTotal    *prometheus.CounterVec
+	HopLastMs       *prometheus.GaugeVec
+	HopAvgMs        *prometheus.GaugeVec
+	HopBestMs       *prometheus.GaugeVec
+	HopWorstMs      *prometheus.GaugeVec
+	HopStddevMs     *prometheus.GaugeVec
+	ReportMs        *prometheus.GaugeVec
+	ReportHops      *prometheus.GaugeVec
+	ReportLoss      *prometheus.GaugeVec
+	ReportPackets   *prometheus.GaugeVec
+	RouteVolatility *prometheus.GaugeVec
 }
 
 func NewCollector() *Collector {
@@ -72,6 +73,10 @@ func NewCollector() *Collector {
 			Name: "mtr_report_packets",
 			Help: "The total number of packets sent in the mtr report",
 		}, []string{"target"}),
+		RouteVolatility: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mtr_route_volatility",
+			Help: "Indicates route volatility metrics: route_changed (true/false), hop_count_variance (variance of hop counts), latency_jitter (average latency variance across hops)",
+		}, []string{"target", "route_changed", "hop_count_variance", "latency_jitter"}),
 	}
 }
 
@@ -87,6 +92,7 @@ func (c *Collector) Reset() {
 	c.ReportHops.Reset()
 	c.ReportLoss.Reset()
 	c.ReportPackets.Reset()
+	c.RouteVolatility.Reset()
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
@@ -101,6 +107,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.ReportHops.Collect(ch)
 	c.ReportLoss.Collect(ch)
 	c.ReportPackets.Collect(ch)
+	c.RouteVolatility.Collect(ch)
 }
 
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
@@ -115,4 +122,5 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	c.ReportHops.Describe(ch)
 	c.ReportLoss.Describe(ch)
 	c.ReportPackets.Describe(ch)
+	c.RouteVolatility.Describe(ch)
 }
