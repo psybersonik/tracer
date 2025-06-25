@@ -1,0 +1,7 @@
+# Default configuration for mtr-exporter
+metrics_port: 8080  # Prometheus metrics port
+db_path: GeoLite2-ASN.mmdb
+# log_file: tracer.log  # Log output file
+targets:
+  - host: 1.1.1.1  # Cloudflare DNS
+    schedule: "@every 300s"
