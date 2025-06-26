@@ -8,7 +8,7 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 
 - Runs MTR against single or multiple targets with configurable schedules.
 - Exposes Prometheus metrics for packet loss, latency, route volatility, and ASN database update status, with `target`, `hop`, `ip`, `asn`, and `org` labels.
-- Supports ASN lookups using a local CSV database (`asn.csv`), with fallback to "unavailable" if the database is unavailable.
+- Supports ASN lookups using a local CSV database (`asn.csv`), with fallback to "unavailable" if the database is unavailable and "notfound" if no ASN entry matches.
 - Safely updates the CSV database at configurable intervals, using local files or URL downloads, with success/failure metrics.
 - Configurable via command-line flags or YAML file (with `#` comment support and environment variable substitution).
 - Redirects non-`/metrics` HTTP requests to `/metrics` (and non-`/metrics/golang` if Go metrics enabled).
@@ -134,11 +134,13 @@ Environment variables can be substituted using `${VARIABLE}` or `${VARIABLE:defa
 
 ### CSV ASN Database
 
-The CSV ASN database must have a header row: `network,autonomous_system_number,autonomous_system_organization`. The `network` field contains IPv4 or IPv6 addresses in CIDR notation. Example `asn.csv`:
+The CSV ASN database must have a header row: `network,autonomous_system_number,autonomous_system_organization`. The `network` field can contain either single IPv4 or IPv6 addresses (e.g., `1.1.1.1`, `2001:db8::1`) or CIDR networks (e.g., `192.168.1.0/24`). Single IP addresses take precedence over CIDR network matches for ASN lookups. If the database is unavailable, ASN and organization values are set to "unavailable". If no matching ASN entry is found, values are set to "notfound". Example `asn.csv`:
 ```csv
 network,autonomous_system_number,autonomous_system_organization
+1.1.1.1,13335,Cloudflare
+8.8.8.8,15169,Google
+2001:db8::1,15169,Google
 192.168.1.0/24,13335,Cloudflare
-2001:db8::/32,15169,Google
 ```
 
 ### Metrics
@@ -165,8 +167,8 @@ network,autonomous_system_number,autonomous_system_organization
 
 Example:
 ```
-mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="10.196.255.74",asn="unavailable",org="unavailable"} 0.1
-mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="203.0.113.1",asn="unavailable",org="unavailable"} 0.05
+mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="10.196.255.74",asn="notfound",org="notfound"} 0.1
+mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="203.0.113.1",asn="notfound",org="notfound"} 0.05
 mtr_hop_loss_ratio{target="1.1.1.1",hop="last",ip="one.one.one.one",asn="AS13335",org="Cloudflare"} 0
 mtr_route_volatility{target="1.1.1.1",route_changed="false",hop_count_variance="0.25",latency_jitter="1.50"} 1
 mtr_asn_db_update_status{status="success",source="https://example.com/asn.csv"} 1

@@ -1,7 +1,7 @@
 metrics_port: 8080
 disable_golang_metrics: false
 db_path: asn.csv
-log_file: /tmp/tracer.log
+# log_file: /tmp/tracer.log
 db_update_interval: 24h
 db_update_source: updated_asn.csv
 # db_update_source: https://example.com/asn.csv

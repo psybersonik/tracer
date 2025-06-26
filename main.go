@@ -49,9 +49,10 @@ var (
 
 // ASNEntry represents a row in the CSV ASN database.
 type ASNEntry struct {
-	Network *net.IPNet
-	ASN     string
-	Org     string
+	Network    *net.IPNet
+	IsSingleIP bool
+	ASN        string
+	Org        string
 }
 
 // ASNDB holds the CSV ASN database.
@@ -70,58 +71,6 @@ func (h *DBHolder) Get() *ASNDB {
 
 func (h *DBHolder) Set(db *ASNDB) {
 	h.db.Store(db)
-}
-
-func init() {
-	flag.Usage = func() {
-		usage := `tracer v%[1]s
-
-Usage: %[2]s [flags] [-- MTR arguments]
-
-tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
-MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
-Requests to other paths redirect to /metrics.
-Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
-If no arguments are provided, uses default_config.yaml in the executable directory.
-Command-line flags override config.yaml settings.
-Example: %[2]s -config=config.yaml
-Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
-Example: %[2]s
-
-Flags:
-`
-		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
-			log.Printf("Failed to write usage message: %v", err)
-		}
-		flag.PrintDefaults()
-		notes := `
-Notes:
-- If -config is set, MTR arguments are ignored.
-- If no arguments are provided, default_config.yaml must exist in the executable directory.
-- Logs are written to stdout unless -log-file or config.yaml log_file is set.
-- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
-- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
-- CSV ASN database updates require a valid source (local file or URL).
-- If asn.csv is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
-- CSV ASN database format (header: network,autonomous_system_number,autonomous_system_organization):
-  192.168.1.0/24,13335,Cloudflare
-  2001:db8::/32,15169,Google
-- YAML config example:
-  # Main settings
-  metrics_port: 8080  # Prometheus port
-  disable_golang_metrics: false  # Disable Go runtime metrics
-  db_path: /tmp/asn.csv
-  log_file: /tmp/tracer.log  # Log output file
-  db_update_interval: 24h  # Update check interval
-  db_update_source: https://example.com/asn.csv
-  targets:
-    - host: 1.1.1.1  # Cloudflare DNS
-      schedule: "@every 300s"
-`
-		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
-			log.Printf("Failed to write usage notes: %v", err)
-		}
-	}
 }
 
 // Config defines the YAML structure for settings and targets.
@@ -177,6 +126,64 @@ func (jm *JobManager) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func init() {
+	flag.Usage = func() {
+		usage := `tracer v%[1]s
+
+Usage: %[2]s [flags] [-- MTR arguments]
+
+tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
+MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
+Requests to other paths redirect to /metrics.
+Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
+If no arguments are provided, uses default_config.yaml in the executable directory.
+Command-line flags override config.yaml settings.
+Example: %[2]s -config=config.yaml
+Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
+Example: %[2]s
+
+Flags:
+`
+		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
+			log.Printf("Failed to write usage message: %v", err)
+			os.Exit(1)
+		}
+		flag.PrintDefaults()
+		notes := `
+Notes:
+- If -config is set, MTR arguments are ignored.
+- If no arguments are provided, default_config.yaml must exist in the executable directory.
+- Logs are written to stdout unless -log-file or config.yaml log_file is set.
+- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
+- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
+- CSV ASN database updates require a valid source (local file or URL).
+- If asn.csv is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
+- If no ASN entry is found for an IP, "notfound" is used for ASN and organization values.
+- CSV ASN database format (header: network,autonomous_system_number,autonomous_system_organization):
+  - network: Single IPv4/IPv6 address (e.g., 1.1.1.1, 2001:db8::1) or CIDR network (e.g., 192.168.1.0/24). Single IPs take precedence over CIDR matches.
+  - Example:
+    1.1.1.1,13335,Cloudflare
+    2001:db8::1,15169,Google
+    192.168.1.0/24,13335,Cloudflare
+- YAML config example:
+  # Main settings
+  metrics_port: 8080  # Prometheus port
+  disable_golang_metrics: false  # Disable Go runtime metrics
+  db_path: /tmp/asn.csv
+  log_file: /tmp/tracer.log  # Log output file
+  db_update_interval: 24h  # Update check interval
+  db_update_source: https://example.com/asn.csv
+  targets:
+    - host: 1.1.1.1  # Cloudflare DNS
+      schedule: "@every 300s"
+`
+		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
+			log.Printf("Failed to write usage notes: %v", err)
+			os.Exit(1)
+		}
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -218,26 +225,26 @@ func main() {
 
 	// Apply config.yaml settings if not overridden by flags
 	if config != nil {
-		if dbPathValue == "" && config.DBPath != "" {
+		if dbPathValue == "" {
 			dbPathValue = config.DBPath
 		}
-		if logFileValue == "" && config.LogFile != "" {
+		if logFileValue == "" {
 			logFileValue = config.LogFile
 		}
-		if metricsPortValue == 8080 && config.MetricsPort != 0 {
+		if metricsPortValue == 8080 {
 			metricsPortValue = config.MetricsPort
 		}
-		if !disableGolangMetricsValue && config.DisableGolangMetrics {
+		if !disableGolangMetricsValue {
 			disableGolangMetricsValue = config.DisableGolangMetrics
 		}
 		if dbUpdateIntervalValue == 0 && config.DBUpdateInterval != "" {
-			if duration, err := time.ParseDuration(config.DBUpdateInterval); err == nil {
-				dbUpdateIntervalValue = duration
-			} else {
+			if duration, err := time.ParseDuration(config.DBUpdateInterval); err != nil {
 				log.Printf("invalid db_update_interval in config: %v", err)
+			} else {
+				dbUpdateIntervalValue = duration
 			}
 		}
-		if dbUpdateSourceValue == "" && config.DBUpdateSource != "" {
+		if dbUpdateSourceValue == "" {
 			dbUpdateSourceValue = config.DBUpdateSource
 		}
 	}
@@ -430,15 +437,15 @@ func loadConfig(path string) (*Config, error) {
 // lookupASN queries the CSV ASN database for ASN and organization
 func lookupASN(db *ASNDB, host string) (string, string) {
 	if db == nil {
-		log.Printf("CSV ASN database is not available for host %s; using 'unavailable' as ASN Value", host)
+		log.Printf("CSV ASN database is unavailable for host %s; returning 'unavailable'", host)
 		return "unavailable", "unavailable"
 	}
 	ipStr := host
 	if net.ParseIP(host) == nil {
 		ips, err := net.LookupIP(host)
 		if err != nil || len(ips) == 0 {
-			log.Printf("Failed to resolve hostname %s: %v; using 'unavailable' as ASN Value", host, err)
-			return "unavailable", "unavailable"
+			log.Printf("Failed to resolve hostname %s: %v; returning 'notfound'", host, err)
+			return "notfound", "notfound"
 		}
 		for _, ip := range ips {
 			if ip.To4() != nil {
@@ -453,15 +460,22 @@ func lookupASN(db *ASNDB, host string) (string, string) {
 
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		log.Printf("Invalid IP after resolution: %s; using 'unavailable' as ASN Value", ipStr)
-		return "unavailable", "unavailable"
+		log.Printf("Invalid IP after resolution: %s; returning 'notfound'", ipStr)
+		return "notfound", "notfound"
 	}
 
-	// Find the longest prefix match
+	// Check for exact IP match first
+	for _, entry := range db.Entries {
+		if entry.IsSingleIP && entry.Network.IP.String() == ipStr {
+			return "AS" + entry.ASN, entry.Org
+		}
+	}
+
+	// Fallback to longest prefix match for CIDR networks
 	var bestMatch *ASNEntry
 	var bestPrefixLen int
 	for _, entry := range db.Entries {
-		if entry.Network.Contains(ip) {
+		if !entry.IsSingleIP && entry.Network.Contains(ip) {
 			_, bits := entry.Network.Mask.Size()
 			if bestMatch == nil || bits > bestPrefixLen {
 				bestMatch = &entry
@@ -471,8 +485,8 @@ func lookupASN(db *ASNDB, host string) (string, string) {
 	}
 
 	if bestMatch == nil {
-		log.Printf("No ASN match found for %s; using 'unavailable' as ASN Value", ipStr)
-		return "unavailable", "unavailable"
+		log.Printf("No ASN match found for %s; returning 'notfound'", ipStr)
+		return "notfound", "notfound"
 	}
 
 	return "AS" + bestMatch.ASN, bestMatch.Org
@@ -507,15 +521,38 @@ func loadCSVDatabase(path string) (*ASNDB, error) {
 			log.Printf("Skipping invalid CSV record at line %d: %v", i+2, record)
 			continue
 		}
-		_, network, err := net.ParseCIDR(record[0])
-		if err != nil {
-			log.Printf("Skipping invalid network %s at line %d: %v", record[0], i+2, err)
-			continue
+		var network *net.IPNet
+		isSingleIP := false
+		if strings.Contains(record[0], "/") {
+			_, network, err = net.ParseCIDR(record[0])
+			if err != nil {
+				log.Printf("Skipping invalid network %s at line %d: %v", record[0], i+2, err)
+				continue
+			}
+		} else {
+			ip := net.ParseIP(record[0])
+			if ip == nil {
+				log.Printf("Skipping invalid IP %s at line %d: invalid IP address", record[0], i+2)
+				continue
+			}
+			isSingleIP = true
+			var ipNet *net.IPNet
+			if ip.To4() != nil {
+				_, ipNet, err = net.ParseCIDR(record[0] + "/32")
+			} else {
+				_, ipNet, err = net.ParseCIDR(record[0] + "/128")
+			}
+			if err != nil {
+				log.Printf("Skipping invalid IP %s at line %d: %v", record[0], i+2, err)
+				continue
+			}
+			network = ipNet
 		}
 		db.Entries = append(db.Entries, ASNEntry{
-			Network: network,
-			ASN:     record[1],
-			Org:     record[2],
+			Network:    network,
+			IsSingleIP: isSingleIP,
+			ASN:        record[1],
+			Org:        record[2],
 		})
 	}
 
@@ -583,7 +620,10 @@ func loadNewDatabase(source, dbPath string) (*ASNDB, error) {
 			}
 			return nil, fmt.Errorf("failed to write temp file: %w", err)
 		}
-		tmpFile.Close()
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("Failed to close temp file: %v", err)
+			return nil, fmt.Errorf("failed to close temp file: %w", err)
+		}
 		// Load from temp file
 		db, err := loadCSVDatabase(tmpFile.Name())
 		if err != nil {
