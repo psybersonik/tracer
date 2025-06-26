@@ -71,7 +71,7 @@ Notes:
 - Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
 - YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
 - MaxMind DB updates require a valid license key for API downloads.
-- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values recorded as "unknown" until the database is available.
+- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
 - YAML config example:
   # Main settings
   metrics_port: 8080  # Prometheus port
@@ -243,16 +243,19 @@ func main() {
 
 	// Initialize MaxMind database
 	dbHolder := &DBHolder{}
+	var dbInitiallyUnavailable bool
 	db, err := geoip2.Open(dbPathValue)
 	if err != nil {
-		log.Printf("Failed to open GeoLite2-ASN.mmdb at %s: %v; continuing with ASN values as 'unknown'", dbPathValue, err)
+		log.Printf("Failed to open GeoLite2-ASN.mmdb at %s: %v; continuing with ASN values as 'unavailable'", dbPathValue, err)
 		dbHolder.Set(nil)
+		dbInitiallyUnavailable = true
 		// Attempt to download database if update source is configured
 		if dbUpdateSourceValue != "" && maxmindLicenseKeyValue != "" {
 			log.Printf("Attempting to download GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
 			if newDB, err := loadNewDatabase(dbUpdateSourceValue, maxmindLicenseKeyValue, dbPathValue); err == nil {
 				dbHolder.Set(newDB)
 				log.Printf("Successfully loaded initial GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
+				dbInitiallyUnavailable = false
 			} else {
 				log.Printf("Failed to download initial GeoLite2-ASN.mmdb: %v", err)
 			}
@@ -281,7 +284,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if dbUpdateIntervalValue > 0 && dbUpdateSourceValue != "" {
-		go updateDatabase(ctx, dbHolder, dbPathValue, dbUpdateSourceValue, maxmindLicenseKeyValue, dbUpdateIntervalValue)
+		go updateDatabase(ctx, dbHolder, dbPathValue, dbUpdateSourceValue, maxmindLicenseKeyValue, dbUpdateIntervalValue, &dbInitiallyUnavailable)
 	}
 
 	// Create scheduler
@@ -409,15 +412,15 @@ func loadConfig(path string) (*Config, error) {
 // lookupASN queries the MaxMind database for ASN and organization
 func lookupASN(db *geoip2.Reader, host string) (string, string) {
 	if db == nil {
-		log.Printf("MaxMind database is not available for host %s; using 'unknown'", host)
-		return "unknown", "unknown"
+		log.Printf("MaxMind database is not available for host %s; using 'unavailable' as ASN Value", host)
+		return "unavailable", "unavailable"
 	}
 	ipStr := host
 	if net.ParseIP(host) == nil {
 		ips, err := net.LookupIP(host)
 		if err != nil || len(ips) == 0 {
-			log.Printf("Failed to resolve hostname %s: %v", host, err)
-			return "unknown", "unknown"
+			log.Printf("Failed to resolve hostname %s: %v; using 'unavailable' as ASN Value", host, err)
+			return "unavailable", "unavailable"
 		}
 		for _, ip := range ips {
 			if ip.To4() != nil {
@@ -432,26 +435,26 @@ func lookupASN(db *geoip2.Reader, host string) (string, string) {
 
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		log.Printf("Invalid IP after resolution: %s", ipStr)
-		return "unknown", "unknown"
+		log.Printf("Invalid IP after resolution: %s; using 'unavailable' as ASN Value", ipStr)
+		return "unavailable", "unavailable"
 	}
 
 	record, err := db.ASN(ip)
 	if err != nil {
-		log.Printf("ASN lookup failed for %s: %v", ipStr, err)
-		return "unknown", "unknown"
+		log.Printf("ASN lookup failed for %s: %v; using 'unavailable' as ASN Value", ipStr, err)
+		return "unavailable", "unavailable"
 	}
 
 	asn := fmt.Sprintf("AS%d", record.AutonomousSystemNumber)
 	org := record.AutonomousSystemOrganization
 	if org == "" {
-		org = "unknown"
+		org = "unavailable"
 	}
 	return asn, org
 }
 
 // updateDatabase periodically checks for and applies database updates.
-func updateDatabase(ctx context.Context, dbHolder *DBHolder, dbPath, source, licenseKey string, interval time.Duration) {
+func updateDatabase(ctx context.Context, dbHolder *DBHolder, dbPath, source, licenseKey string, interval time.Duration, dbInitiallyUnavailable *bool) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -470,13 +473,18 @@ func updateDatabase(ctx context.Context, dbHolder *DBHolder, dbPath, source, lic
 			}
 			oldDB := dbHolder.Get()
 			dbHolder.Set(newDB)
+			if *dbInitiallyUnavailable {
+				log.Printf("GeoLite2-ASN.mmdb successfully downloaded from %s at %s", source, time.Now().Format(time.RFC3339))
+				*dbInitiallyUnavailable = false
+			} else {
+				log.Printf("Successfully updated MaxMind database from %s at %s", source, time.Now().Format(time.RFC3339))
+			}
+			dbUpdateStatus.WithLabelValues("success", source).Set(1)
 			if oldDB != nil {
 				if err := oldDB.Close(); err != nil {
 					log.Printf("Failed to close old MaxMind database: %v", err)
 				}
 			}
-			log.Printf("Successfully updated MaxMind database from %s at %s", source, time.Now().Format(time.RFC3339))
-			dbUpdateStatus.WithLabelValues("success", source).Set(1)
 		}
 	}
 }
