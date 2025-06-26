@@ -65,9 +65,12 @@ Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.l
 Example: %[2]s
 
 Flags:
-
-%[3]s
-
+`
+		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
+			log.Printf("Failed to write usage message: %v", err)
+		}
+		flag.PrintDefaults()
+		notes := `
 Notes:
 - If -config is set, MTR arguments are ignored.
 - If no arguments are provided, default_config.yaml must exist in the executable directory.
@@ -80,17 +83,17 @@ Notes:
   # Main settings
   metrics_port: 8080  # Prometheus port
   disable_golang_metrics: false  # Disable Go runtime metrics
-  db_path: ${DB_PATH:/path/to/GeoLite2-ASN.mmdb}
-  log_file: ${LOG_FILE:/tmp/tracer.log}  # Log output file
-  db_update_interval: ${UPDATE_INTERVAL:24h}  # Update check interval
-  db_update_source: ${UPDATE_SOURCE:https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz}
-  maxmind_license_key: ${MAXMIND_KEY}
+  db_path: /tmp/GeoLite2-ASN.mmdb
+  log_file: /tmp/tracer.log  # Log output file
+  db_update_interval: 24h  # Update check interval
+  db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
+  maxmind_license_key: YOUR_KEY  # Example: ${MAXMIND_LICENSE_KEY:your_default_key}
   targets:
-    - host: ${TARGET_HOST:1.1.1.1}  # Cloudflare DNS
+    - host: 1.1.1.1  # Cloudflare DNS
       schedule: "@every 300s"
 `
-		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0], flag.CommandLine.Output()); err != nil {
-			log.Printf("Failed to write usage message: %v", err)
+		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
+			log.Printf("Failed to write usage notes: %v", err)
 		}
 	}
 }
