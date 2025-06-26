@@ -71,10 +71,11 @@ Notes:
 - Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
 - YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
 - MaxMind DB updates require a valid license key for API downloads.
+- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values recorded as "unknown" until the database is available.
 - YAML config example:
   # Main settings
   metrics_port: 8080  # Prometheus port
-  disable_golang_metrics: false  # Disable Go runtime metrics (default: false)
+  disable_golang_metrics: false  # Disable Go runtime metrics
   db_path: ${DB_PATH:/path/to/GeoLite2-ASN.mmdb}
   log_file: ${LOG_FILE:/tmp/tracer.log}  # Log output file
   db_update_interval: ${UPDATE_INTERVAL:24h}  # Update check interval
@@ -241,12 +242,24 @@ func main() {
 	}
 
 	// Initialize MaxMind database
+	dbHolder := &DBHolder{}
 	db, err := geoip2.Open(dbPathValue)
 	if err != nil {
-		log.Fatalf("failed to open GeoLite2-ASN.mmdb at %s: %v", dbPathValue, err)
+		log.Printf("Failed to open GeoLite2-ASN.mmdb at %s: %v; continuing with ASN values as 'unknown'", dbPathValue, err)
+		dbHolder.Set(nil)
+		// Attempt to download database if update source is configured
+		if dbUpdateSourceValue != "" && maxmindLicenseKeyValue != "" {
+			log.Printf("Attempting to download GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
+			if newDB, err := loadNewDatabase(dbUpdateSourceValue, maxmindLicenseKeyValue, dbPathValue); err == nil {
+				dbHolder.Set(newDB)
+				log.Printf("Successfully loaded initial GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
+			} else {
+				log.Printf("Failed to download initial GeoLite2-ASN.mmdb: %v", err)
+			}
+		}
+	} else {
+		dbHolder.Set(db)
 	}
-	dbHolder := &DBHolder{}
-	dbHolder.Set(db)
 
 	// Create separate registries for MTR and Golang metrics
 	mtrRegistry := prometheus.NewRegistry()
@@ -396,7 +409,7 @@ func loadConfig(path string) (*Config, error) {
 // lookupASN queries the MaxMind database for ASN and organization
 func lookupASN(db *geoip2.Reader, host string) (string, string) {
 	if db == nil {
-		log.Printf("MaxMind database is nil for host %s", host)
+		log.Printf("MaxMind database is not available for host %s; using 'unknown'", host)
 		return "unknown", "unknown"
 	}
 	ipStr := host

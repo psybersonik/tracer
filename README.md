@@ -6,13 +6,14 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 
 - Runs MTR against single or multiple targets with configurable schedules.
 - Exposes Prometheus metrics for packet loss, latency, route volatility, MaxMind database update status, and more, with `target`, `hop`, `ip`, `asn`, and `org` labels.
-- Supports ASN lookups using a local `GeoLite2-ASN.mmdb` database.
+- Supports ASN lookups using a local `GeoLite2-ASN.mmdb` database, with fallback to "unknown" if the database is unavailable.
 - Safely updates the MaxMind database in-line at configurable intervals, using local files or MaxMind API downloads, with success/failure metrics.
 - Configurable via command-line flags or YAML file (with `#` comment support and environment variable substitution).
 - Redirects non-`/metrics` HTTP requests to `/metrics` (and non-`/metrics/golang` if Go metrics enabled).
 - Logs to stdout or a specified file, including detailed MaxMind update events.
 - Default configuration (`default_config.yaml`) used when no arguments are provided.
 - Option to disable Go runtime metrics.
+- Continues execution with ASN values as "unknown" if `GeoLite2-ASN.mmdb` is missing, until the database is downloaded or provided.
 
 ## Installation
 
@@ -20,8 +21,8 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 
 - Go 1.21 or higher
 - MTR (My Traceroute) installed (`sudo apt install mtr` or equivalent)
-- MaxMind GeoLite2 ASN database (`GeoLite2-ASN.mmdb`)
-- MaxMind license key (for API database updates)
+- MaxMind GeoLite2 ASN database (`GeoLite2-ASN.mmdb`, optional at startup; can be downloaded via `db_update_source`)
+- MaxMind license key (for API database downloads)
 
 ### Build
 
@@ -95,7 +96,7 @@ View MTR metrics at `http://localhost:<metrics-port>/metrics` and Go runtime met
 
 ### YAML Configuration
 
-The YAML config supports `#` comments, environment variable substitution (`${VARIABLE}` or `${VARIABLE:default}`), and defines settings and multiple targets. Command-line flags override YAML settings. Example `config.yaml`:
+The YAML config supports `#` comments, environment variable substitution (`${VARIABLE}` or `${VARIABLE:default}`), and defines settings and multiple targets. Command-line flags override YAML settings. If `GeoLite2-ASN.mmdb` is missing at startup, `tracer` continues with ASN values as "unknown" and attempts to download the database if `db_update_source` and `maxmind_license_key` are set. Example `config.yaml`:
 ```yaml
 # Configuration for tracer
 metrics_port: 8080  # Prometheus metrics port
