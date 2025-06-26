@@ -41,4 +41,4 @@ tracer
 *.log
 
 # Production Config
-prodconfig.yaml
+prod_config.yaml
