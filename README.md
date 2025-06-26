@@ -9,9 +9,10 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 - Supports ASN lookups using a local `GeoLite2-ASN.mmdb` database.
 - Safely updates the MaxMind database in-line at configurable intervals, using local files or MaxMind API downloads, with success/failure metrics.
 - Configurable via command-line flags or YAML file (with `#` comment support and environment variable substitution).
-- Redirects non-`/metrics` HTTP requests to `/metrics` with a 302 status.
+- Redirects non-`/metrics` HTTP requests to `/metrics` (and non-`/metrics/golang` if Go metrics enabled).
 - Logs to stdout or a specified file, including detailed MaxMind update events.
 - Default configuration (`default_config.yaml`) used when no arguments are provided.
+- Option to disable Go runtime metrics.
 
 ## Installation
 
@@ -72,11 +73,17 @@ Run with default config (requires `default_config.yaml` in the executable direct
 sudo ./tracer
 ```
 
-View MTR metrics at `http://localhost:<metrics-port>/metrics` and Golang runtime metrics at `http://localhost:<metrics-port>/metrics/golang`. Requests to other paths (e.g., `/`) redirect to `/metrics`.
+Disable Go runtime metrics:
+```bash
+sudo ./tracer -config=/path/to/config.yaml -disable-golang-metrics
+```
+
+View MTR metrics at `http://localhost:<metrics-port>/metrics` and Go runtime metrics at `http://localhost:<metrics-port>/metrics/golang` (unless disabled). Requests to other paths (e.g., `/`) redirect to `/metrics`.
 
 ### Command-Line Flags
 
 - `-metrics-port int`: Port for Prometheus metrics HTTP endpoint (default: 8080).
+- `-disable-golang-metrics`: Disable Go runtime metrics endpoint (default: false).
 - `-config string`: Path to YAML config file defining settings and MTR targets (e.g., `config.yaml`).
 - `-db-path string`: Path to MaxMind `GeoLite2-ASN.mmdb` database (default: `GeoLite2-ASN.mmdb` in executable directory).
 - `-log-file string`: Path to log file (default: stdout; overridden by `log_file` in config.yaml).
@@ -92,6 +99,7 @@ The YAML config supports `#` comments, environment variable substitution (`${VAR
 ```yaml
 # Configuration for tracer
 metrics_port: 8080  # Prometheus metrics port
+disable_golang_metrics: false  # Disable Go runtime metrics
 db_path: /tmp/GeoLite2-ASN.mmdb  # Path to MaxMind database
 log_file: /tmp/tracer.log  # Log output file
 db_update_interval: 24h  # Check for updates
@@ -112,6 +120,7 @@ If no arguments are provided, the program uses `default_config.yaml` in the exec
 ```yaml
 # Default configuration
 metrics_port: 8080
+disable_golang_metrics: false
 db_path: GeoLite2-ASN.mmdb
 log_file: tracer.log
 db_update_interval: 24h
@@ -157,6 +166,7 @@ mtr_report_duration_ms{target="1.1.1.1"} 16279
 
 #### Golang Metrics (`/metrics/golang`)
 
+Available unless disabled via `-disable-golang-metrics` or `disable_golang_metrics: true`:
 - `go_goroutines`
 - `go_memstats_alloc_bytes`
 - `process_cpu_seconds_total`

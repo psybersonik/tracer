@@ -28,13 +28,14 @@ import (
 )
 
 var (
-	metricsPort       = flag.Int("metrics-port", 8080, "Port for Prometheus metrics HTTP endpoint (default: 8080)")
-	configPath        = flag.String("config", "", "Path to YAML config file defining settings and MTR targets (e.g., config.yaml)")
-	dbPath            = flag.String("db-path", "", "Path to MaxMind GeoLite2-ASN.mmdb database for ASN lookups (default: GeoLite2-ASN.mmdb in executable directory)")
-	logFile           = flag.String("log-file", "", "Path to log file (default: stdout; overridden by config.yaml log_file if set)")
-	dbUpdateInterval  = flag.Duration("db-update-interval", 0, "Interval to check for MaxMind GeoLite2-ASN.mmdb updates (e.g., 24h; 0 disables updates)")
-	dbUpdateSource    = flag.String("db-update-source", "", "Source for MaxMind GeoLite2-ASN.mmdb updates (local file path or MaxMind API URL; requires license key for API)")
-	maxmindLicenseKey = flag.String("maxmind-license-key", "", "MaxMind license key for downloading GeoLite2-ASN.mmdb updates")
+	metricsPort          = flag.Int("metrics-port", 8080, "Port for Prometheus metrics HTTP endpoint (default: 8080)")
+	disableGolangMetrics = flag.Bool("disable-golang-metrics", false, "Disable Go runtime metrics endpoint (default: false)")
+	configPath           = flag.String("config", "", "Path to YAML config file defining settings and MTR targets (e.g., config.yaml)")
+	dbPath               = flag.String("db-path", "", "Path to MaxMind GeoLite2-ASN.mmdb database for ASN lookups (default: GeoLite2-ASN.mmdb in executable directory)")
+	logFile              = flag.String("log-file", "", "Path to log file (default: stdout; overridden by config.yaml log_file if set)")
+	dbUpdateInterval     = flag.Duration("db-update-interval", 0, "Interval to check for MaxMind GeoLite2-ASN.mmdb updates (e.g., 24h; 0 disables updates)")
+	dbUpdateSource       = flag.String("db-update-source", "", "Source for MaxMind GeoLite2-ASN.mmdb updates (local file path or MaxMind API URL; requires license key for API)")
+	maxmindLicenseKey    = flag.String("maxmind-license-key", "", "MaxMind license key for downloading GeoLite2-ASN.mmdb updates")
 )
 
 // Metrics for database updates
@@ -50,7 +51,7 @@ func init() {
 		usage := `Usage: %s [flags] [-- MTR arguments]
 
 tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
-MTR metrics are available at /metrics; Golang runtime metrics at /metrics/golang.
+MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
 Requests to other paths redirect to /metrics.
 Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
 If no arguments are provided, uses default_config.yaml in the executable directory.
@@ -73,6 +74,7 @@ Notes:
 - YAML config example:
   # Main settings
   metrics_port: 8080  # Prometheus port
+  disable_golang_metrics: false  # Disable Go runtime metrics (default: false)
   db_path: ${DB_PATH:/path/to/GeoLite2-ASN.mmdb}
   log_file: ${LOG_FILE:/tmp/tracer.log}  # Log output file
   db_update_interval: ${UPDATE_INTERVAL:24h}  # Update check interval
@@ -90,13 +92,14 @@ Notes:
 
 // Config defines the YAML structure for settings and targets.
 type Config struct {
-	MetricsPort       int      `yaml:"metrics_port"`
-	DBPath            string   `yaml:"db_path"`
-	LogFile           string   `yaml:"log_file"`
-	DBUpdateInterval  string   `yaml:"db_update_interval"`
-	DBUpdateSource    string   `yaml:"db_update_source"`
-	MaxmindLicenseKey string   `yaml:"maxmind_license_key"`
-	Targets           []Target `yaml:"targets"`
+	MetricsPort          int      `yaml:"metrics_port"`
+	DisableGolangMetrics bool     `yaml:"disable_golang_metrics"`
+	DBPath               string   `yaml:"db_path"`
+	LogFile              string   `yaml:"log_file"`
+	DBUpdateInterval     string   `yaml:"db_update_interval"`
+	DBUpdateSource       string   `yaml:"db_update_source"`
+	MaxmindLicenseKey    string   `yaml:"maxmind_license_key"`
+	Targets              []Target `yaml:"targets"`
 }
 
 // Target defines a single MTR target and its schedule.
@@ -168,6 +171,7 @@ func main() {
 	configPathValue := *configPath
 	dbPathValue := *dbPath
 	metricsPortValue := *metricsPort
+	disableGolangMetricsValue := *disableGolangMetrics
 	logFileValue := *logFile
 	dbUpdateIntervalValue := *dbUpdateInterval
 	dbUpdateSourceValue := *dbUpdateSource
@@ -200,6 +204,9 @@ func main() {
 		}
 		if metricsPortValue == 8080 && config.MetricsPort != 0 {
 			metricsPortValue = config.MetricsPort
+		}
+		if !disableGolangMetricsValue && config.DisableGolangMetrics {
+			disableGolangMetricsValue = config.DisableGolangMetrics
 		}
 		if dbUpdateIntervalValue == 0 && config.DBUpdateInterval != "" {
 			if duration, err := time.ParseDuration(config.DBUpdateInterval); err == nil {
@@ -243,18 +250,19 @@ func main() {
 
 	// Create separate registries for MTR and Golang metrics
 	mtrRegistry := prometheus.NewRegistry()
-	golangRegistry := prometheus.NewRegistry()
+	var golangRegistry *prometheus.Registry
+	if !disableGolangMetricsValue {
+		golangRegistry = prometheus.NewRegistry()
+		golangRegistry.MustRegister(
+			collectors.NewGoCollector(),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		)
+	}
 
 	// Register MTR metrics
 	jobManager := NewJobManager()
 	mtrRegistry.MustRegister(jobManager)
-	mtrRegistry.MustRegister(dbUpdateStatus) // Register database update metric
-
-	// Register Golang runtime metrics
-	golangRegistry.MustRegister(
-		collectors.NewGoCollector(),
-		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-	)
+	mtrRegistry.MustRegister(dbUpdateStatus)
 
 	// Start database update goroutine
 	ctx, cancel := context.WithCancel(context.Background())
@@ -323,14 +331,14 @@ func main() {
 		log.Fatal("missing mtr arguments or config file")
 	}
 
-	listenAddr := fmt.Sprintf(":%d", *metricsPort)
-	// Serve MTR metrics at /metrics
+	listenAddr := fmt.Sprintf(":%d", metricsPortValue)
+	// Serve metrics
 	http.Handle("/metrics", promhttp.HandlerFor(mtrRegistry, promhttp.HandlerOpts{}))
-	// Serve Golang metrics at /metrics/golang
-	http.Handle("/metrics/golang", promhttp.HandlerFor(golangRegistry, promhttp.HandlerOpts{}))
-	// Redirect all other paths to /metrics
+	if !disableGolangMetricsValue {
+		http.Handle("/metrics/golang", promhttp.HandlerFor(golangRegistry, promhttp.HandlerOpts{}))
+	}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/metrics" && r.URL.Path != "/metrics/golang" {
+		if r.URL.Path != "/metrics" && (!disableGolangMetricsValue && r.URL.Path != "/metrics/golang") {
 			http.Redirect(w, r, "/metrics", http.StatusFound)
 		}
 	})
