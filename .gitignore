@@ -39,3 +39,6 @@ tracer
 
 # Logfile
 *.log
+
+# Production Config
+prodconfig.yaml

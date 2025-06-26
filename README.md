@@ -2,15 +2,15 @@
 
 A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exposes network diagnostic metrics, enhanced with Autonomous System Number (ASN) information using a MaxMind GeoLite2 ASN database.
 
-
 ## Features
 
 - Runs MTR against single or multiple targets with configurable schedules.
-- Exposes Prometheus metrics for packet loss, latency, route volatility, and more, with `target`, `hop`, `ip`, `asn`, and `org` labels.
+- Exposes Prometheus metrics for packet loss, latency, route volatility, MaxMind database update status, and more, with `target`, `hop`, `ip`, `asn`, and `org` labels.
 - Supports ASN lookups using a local `GeoLite2-ASN.mmdb` database.
-- Configurable via command-line flags or YAML file (with `#` comment support).
+- Safely updates the MaxMind database in-line at configurable intervals, using local files or MaxMind API downloads, with success/failure metrics.
+- Configurable via command-line flags or YAML file (with `#` comment support and environment variable substitution).
 - Redirects non-`/metrics` HTTP requests to `/metrics` with a 302 status.
-- Logs to stdout or a specified file.
+- Logs to stdout or a specified file, including detailed MaxMind update events.
 - Default configuration (`default_config.yaml`) used when no arguments are provided.
 
 ## Installation
@@ -20,6 +20,7 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 - Go 1.21 or higher
 - MTR (My Traceroute) installed (`sudo apt install mtr` or equivalent)
 - MaxMind GeoLite2 ASN database (`GeoLite2-ASN.mmdb`)
+- MaxMind license key (for API database updates)
 
 ### Build
 
@@ -40,7 +41,7 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
    go build -o tracer .
    ```
 
-4. Set MTR permissions (requires raw socket access):
+4. Set MTR permissions (If raw socket access required):
    ```bash
    sudo setcap cap_net_raw+ep /usr/bin/mtr
    sudo setcap cap_net_raw+ep ./tracer
@@ -63,7 +64,7 @@ sudo ./tracer -config=/path/to/config.yaml
 
 Run with a single target:
 ```bash
-sudo ./tracer -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
+sudo ./tracer -metrics-port=9090 -schedule="@every 300s" -log-file=/tmp/tracer.log -- 1.1.1.1
 ```
 
 Run with default config (requires `default_config.yaml` in the executable directory):
@@ -79,24 +80,32 @@ View MTR metrics at `http://localhost:<metrics-port>/metrics` and Golang runtime
 - `-config string`: Path to YAML config file defining settings and MTR targets (e.g., `config.yaml`).
 - `-db-path string`: Path to MaxMind `GeoLite2-ASN.mmdb` database (default: `GeoLite2-ASN.mmdb` in executable directory).
 - `-log-file string`: Path to log file (default: stdout; overridden by `log_file` in config.yaml).
-- `-schedule string`: Cron schedule for single target (e.g., `@every 10s` or `0 * * * * *`) (default: `@every 1m`).
+- `-db-update-interval duration`: Interval to check for MaxMind database updates (e.g., `24h`; 0 disables updates).
+- `-db-update-source string`: Source for MaxMind database updates (local file path or MaxMind API URL, e.g., `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz`).
+- `-maxmind-license-key string`: MaxMind license key for API downloads.
+- `-schedule string`: Cron schedule for single target (e.g., `@every 300s` or `0 * * * * *`) (default: `@every 1m`).
 - `-help`: Display help with usage and configuration details.
 
 ### YAML Configuration
 
-The YAML config supports `#` comments and can define settings and multiple targets. Command-line flags override YAML settings. Example `config.yaml`:
+The YAML config supports `#` comments, environment variable substitution (`${VARIABLE}` or `${VARIABLE:default}`), and defines settings and multiple targets. Command-line flags override YAML settings. Example `config.yaml`:
 ```yaml
 # Configuration for tracer
 metrics_port: 8080  # Prometheus metrics port
-db_path: /path/to/GeoLite2-ASN.mmdb
-log_file: /path/to/tracer.log
+db_path: /tmp/GeoLite2-ASN.mmdb  # Path to MaxMind database
+log_file: /tmp/tracer.log  # Log output file
+db_update_interval: 24h  # Check for updates
+db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz  # MaxMind API URL
+maxmind_license_key: YOUR_KEY  # MaxMind license key
 targets:
   - host: 1.1.1.1  # Cloudflare DNS
-    schedule: "@every 10s"
+    schedule: "@every 300s"
   - host: 8.8.8.8  # Google DNS
-    schedule: "@every 30s"
-  - host: google.com
-    schedule: "0 * * * * *"  # Every minute
+    schedule: "@every 300s"
+  - host: google.com  # Google
+    schedule: "@every 300s"
+  - host: www.akamai.com  # Akamai CDN
+    schedule: "@every 300s"
 ```
 
 If no arguments are provided, the program uses `default_config.yaml` in the executable directory, which must exist. Example `default_config.yaml`:
@@ -105,10 +114,15 @@ If no arguments are provided, the program uses `default_config.yaml` in the exec
 metrics_port: 8080
 db_path: GeoLite2-ASN.mmdb
 log_file: tracer.log
+db_update_interval: 24h
+db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
+maxmind_license_key: YOUR_KEY
 targets:
   - host: 1.1.1.1
-    schedule: "@every 10s"
+    schedule: "@every 300s"
 ```
+
+Environment variables can be substituted using `${VARIABLE}` or `${VARIABLE:default}` syntax. If a variable is unset and no default is provided, it resolves to an empty string, and a warning is logged.
 
 ### Metrics
 
@@ -126,16 +140,18 @@ targets:
 - `mtr_report_loss{target}`: Overall loss ratio of the report.
 - `mtr_report_packets{target}`: Total packets sent in the report.
 - `mtr_route_volatility{target, route_changed, hop_count_variance, latency_jitter}`: Route volatility metrics:
-   - `route_changed`: "true" if hop sequence changed, "false" otherwise.
-   - `hop_count_variance`: Variance of hop counts across recent reports.
-   - `latency_jitter`: Average variance of latency across matching hops in consecutive reports.
-     Value is 1 if metrics are reported, 0 otherwise.
+    - `route_changed`: "true" if hop sequence changed, "false" otherwise.
+    - `hop_count_variance`: Variance of hop counts across recent reports.
+    - `latency_jitter`: Average variance of latency across matching hops in consecutive reports.
+      Value is 1 if metrics are reported, 0 otherwise.
+- `mtr_maxmind_db_update_status{status, source}`: Status of MaxMind database updates (1 for success, 0 for failure).
 
 Example:
 ```
 mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="10.196.255.74",asn="unknown",org="unknown"} 0.1
 mtr_hop_loss_ratio{target="1.1.1.1",hop="last",ip="one.one.one.one",asn="AS13335",org="Cloudflare"} 0
 mtr_route_volatility{target="1.1.1.1",route_changed="false",hop_count_variance="0.25",latency_jitter="1.50"} 1
+mtr_maxmind_db_update_status{status="success",source="https://download.maxmind.com/..."} 1
 mtr_report_duration_ms{target="1.1.1.1"} 16279
 ```
 
@@ -155,7 +171,8 @@ process_cpu_seconds_total 0.01
 
 ## License
 
-See LICENCE File.
+Licensed under [MIT License](https://github.com/psybersonik/tracer?tab=MIT-1-ov-file#readme).
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or pull request on [GitHub](https://github.com/psybersonik/tracer).
