@@ -38,6 +38,8 @@ var (
 	maxmindLicenseKey    = flag.String("maxmind-license-key", "", "MaxMind license key for downloading GeoLite2-ASN.mmdb updates")
 )
 
+const version = "0.7.0"
+
 // Metrics for database updates
 var (
 	dbUpdateStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -48,7 +50,9 @@ var (
 
 func init() {
 	flag.Usage = func() {
-		usage := `Usage: %s [flags] [-- MTR arguments]
+		usage := `tracer v%[1]s
+
+Usage: %[2]s [flags] [-- MTR arguments]
 
 tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
 MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
@@ -56,13 +60,13 @@ Requests to other paths redirect to /metrics.
 Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
 If no arguments are provided, uses default_config.yaml in the executable directory.
 Command-line flags override config.yaml settings.
-Example: %s -config=config.yaml
-Example: %s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
-Example: %s
+Example: %[2]s -config=config.yaml
+Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
+Example: %[2]s
 
 Flags:
 
-%s
+%[3]s
 
 Notes:
 - If -config is set, MTR arguments are ignored.
@@ -85,7 +89,7 @@ Notes:
     - host: ${TARGET_HOST:1.1.1.1}  # Cloudflare DNS
       schedule: "@every 300s"
 `
-		if _, err := fmt.Fprintf(os.Stderr, usage, os.Args[0], os.Args[0], os.Args[0], os.Args[0], flag.CommandLine.Output()); err != nil {
+		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0], flag.CommandLine.Output()); err != nil {
 			log.Printf("Failed to write usage message: %v", err)
 		}
 	}
@@ -359,7 +363,7 @@ func main() {
 		}
 	})
 	scheduler.Start()
-	log.Printf("tracer v0.6.0 starting, listening on %s", listenAddr)
+	log.Printf("tracer v0.7.0 starting, listening on %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
