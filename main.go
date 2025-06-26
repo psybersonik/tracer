@@ -168,6 +168,9 @@ func (h *DBHolder) Set(reader *geoip2.Reader) {
 func main() {
 	flag.Parse()
 
+	// Log initialization with version
+	log.Printf("Initializing tracer v%[1]s", version)
+
 	// Get executable directory
 	exePath, err := os.Executable()
 	if err != nil {
@@ -366,7 +369,7 @@ func main() {
 		}
 	})
 	scheduler.Start()
-	log.Printf("tracer v0.7.0 starting, listening on %s", listenAddr)
+	log.Printf("tracer v%[1]s starting. Metrics served on %s", version, listenAddr)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
