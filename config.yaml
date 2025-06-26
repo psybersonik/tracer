@@ -1,10 +1,10 @@
-# Configuration for tracer
-metrics_port: 8080  # Prometheus metrics port
-db_path: GeoLite2-ASN.mmdb  # Path to MaxMind GeoLite2-ASN database
-log_file: tracer.log  # Log output file
-db_update_interval: 24h  # Check for updates every 24 hours
-db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz  # MaxMind API URL
-maxmind_license_key: YOUR_KEY  # MaxMind license key for API downloads
+metrics_port: 8080
+disable_golang_metrics: false
+db_path: asn.csv
+log_file: /tmp/tracer.log
+db_update_interval: 24h
+db_update_source: updated_asn.csv
+# db_update_source: https://example.com/asn.csv
 targets:
   - host: 1.1.1.1  # Cloudflare DNS
     schedule: "@every 300s"

@@ -35,13 +35,13 @@ type Hop struct {
 // Runner executes MTR and collects reports.
 type Runner struct {
 	args     []string
-	asnFunc  func(string) (string, string)
+	lookup   func(string) (string, string)
 	reporter *exec.Cmd
 }
 
 // NewRunner creates a new MTR runner with ASN lookup function.
-func NewRunner(args []string, asnFunc func(string) (string, string)) *Runner {
-	return &Runner{args: args, asnFunc: asnFunc}
+func NewRunner(args []string, lookup func(string) (string, string)) *Runner {
+	return &Runner{args: args, lookup: lookup}
 }
 
 // Args returns the MTR arguments.
@@ -71,7 +71,7 @@ func (r *Runner) Run(ctx context.Context) (Report, error) {
 
 	for i := range report.Hops {
 		if report.Hops[i].Host != "" && report.Hops[i].Host != "???" {
-			asn, org := r.asnFunc(report.Hops[i].Host)
+			asn, org := r.lookup(report.Hops[i].Host)
 			report.Hops[i].ASN = asn
 			report.Hops[i].Organization = org
 		} else {
