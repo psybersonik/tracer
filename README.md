@@ -194,7 +194,7 @@ process_cpu_seconds_total 0.01
 
 ## License
 
-Licensed under [MIT License](https://github.com/psybersonik/tracer?tab=MIT-1-ov-file#readme).
+Licensed under [MIT License](https://github.com/psybersonik/tracer?tab=MIT-1-ov-file#readme)
 
 ## Contributing
 
