@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/shlex"
+	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -31,10 +31,11 @@ var (
 	metricsPort          = flag.Int("metrics-port", 8080, "Port for Prometheus metrics HTTP endpoint (default: 8080)")
 	disableGolangMetrics = flag.Bool("disable-golang-metrics", false, "Disable Go runtime metrics endpoint (default: false)")
 	configPath           = flag.String("config", "", "Path to YAML config file defining settings and MTR targets (e.g., config.yaml)")
-	dbPath               = flag.String("db-path", "", "Path to CSV ASN database (default: asn.csv in executable directory)")
+	dbPath               = flag.String("db-path", "", "Path to MaxMind GeoLite2-ASN.mmdb database for ASN lookups (default: GeoLite2-ASN.mmdb in executable directory)")
 	logFile              = flag.String("log-file", "", "Path to log file (default: stdout; overridden by config.yaml log_file if set)")
-	dbUpdateInterval     = flag.Duration("db-update-interval", 0, "Interval to check for CSV ASN database updates (e.g., 24h; 0 disables updates)")
-	dbUpdateSource       = flag.String("db-update-source", "", "Source for CSV ASN database updates (local file path or URL)")
+	dbUpdateInterval     = flag.Duration("db-update-interval", 0, "Interval to check for MaxMind GeoLite2-ASN.mmdb updates (e.g., 24h; 0 disables updates)")
+	dbUpdateSource       = flag.String("db-update-source", "", "Source for MaxMind GeoLite2-ASN.mmdb updates (local file path or MaxMind API URL; requires license key for API)")
+	maxmindLicenseKey    = flag.String("maxmind-license-key", "", "MaxMind license key for downloading GeoLite2-ASN.mmdb updates")
 )
 
 const version = "0.7.0"
@@ -42,35 +43,59 @@ const version = "0.7.0"
 // Metrics for database updates
 var (
 	dbUpdateStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "mtr_asn_db_update_status",
-		Help: "Status of CSV ASN database update (1 for success, 0 for failure)",
+		Name: "mtr_maxmind_db_update_status",
+		Help: "Status of MaxMind GeoLite2-ASN.mmdb update (1 for success, 0 for failure)",
 	}, []string{"status", "source"})
 )
 
-// ASNEntry represents a row in the CSV ASN database.
-type ASNEntry struct {
-	Network    *net.IPNet
-	IsSingleIP bool
-	ASN        string
-	Org        string
-}
+func init() {
+	flag.Usage = func() {
+		usage := `tracer v%[1]s
 
-// ASNDB holds the CSV ASN database.
-type ASNDB struct {
-	Entries []ASNEntry
-}
+Usage: %[2]s [flags] [-- MTR arguments]
 
-// DBHolder holds the current ASN database atomically.
-type DBHolder struct {
-	db atomic.Pointer[ASNDB]
-}
+tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
+MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
+Requests to other paths redirect to /metrics.
+Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
+If no arguments are provided, uses default_config.yaml in the executable directory.
+Command-line flags override config.yaml settings.
+Example: %[2]s -config=config.yaml
+Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
+Example: %[2]s
 
-func (h *DBHolder) Get() *ASNDB {
-	return h.db.Load()
-}
-
-func (h *DBHolder) Set(db *ASNDB) {
-	h.db.Store(db)
+Flags:
+`
+		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
+			log.Printf("Failed to write usage message: %v", err)
+		}
+		flag.PrintDefaults()
+		notes := `
+Notes:
+- If -config is set, MTR arguments are ignored.
+- If no arguments are provided, default_config.yaml must exist in the executable directory.
+- Logs are written to stdout unless -log-file or config.yaml log_file is set.
+- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
+- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
+- MaxMind DB updates require a valid license key for API downloads.
+- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
+- YAML config example:
+  # Main settings
+  metrics_port: 8080  # Prometheus port
+  disable_golang_metrics: false  # Disable Go runtime metrics
+  db_path: /tmp/GeoLite2-ASN.mmdb
+  log_file: /tmp/tracer.log  # Log output file
+  db_update_interval: 24h  # Update check interval
+  db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
+  maxmind_license_key: YOUR_KEY  # Example: ${MAXMIND_LICENSE_KEY:your_default_key}
+  targets:
+    - host: 1.1.1.1  # Cloudflare DNS
+      schedule: "@every 300s"
+`
+		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
+			log.Printf("Failed to write usage notes: %v", err)
+		}
+	}
 }
 
 // Config defines the YAML structure for settings and targets.
@@ -81,6 +106,7 @@ type Config struct {
 	LogFile              string   `yaml:"log_file"`
 	DBUpdateInterval     string   `yaml:"db_update_interval"`
 	DBUpdateSource       string   `yaml:"db_update_source"`
+	MaxmindLicenseKey    string   `yaml:"maxmind_license_key"`
 	Targets              []Target `yaml:"targets"`
 }
 
@@ -126,66 +152,24 @@ func (jm *JobManager) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func init() {
-	flag.Usage = func() {
-		usage := `tracer v%[1]s
+// DBHolder holds the current MaxMind database reader atomically.
+type DBHolder struct {
+	reader atomic.Pointer[geoip2.Reader]
+}
 
-Usage: %[2]s [flags] [-- MTR arguments]
+func (h *DBHolder) Get() *geoip2.Reader {
+	return h.reader.Load()
+}
 
-tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
-MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
-Requests to other paths redirect to /metrics.
-Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
-If no arguments are provided, uses default_config.yaml in the executable directory.
-Command-line flags override config.yaml settings.
-Example: %[2]s -config=config.yaml
-Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
-Example: %[2]s
-
-Flags:
-`
-		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
-			log.Printf("Failed to write usage message: %v", err)
-			os.Exit(1)
-		}
-		flag.PrintDefaults()
-		notes := `
-Notes:
-- If -config is set, MTR arguments are ignored.
-- If no arguments are provided, default_config.yaml must exist in the executable directory.
-- Logs are written to stdout unless -log-file or config.yaml log_file is set.
-- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
-- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
-- CSV ASN database updates require a valid source (local file or URL).
-- If asn.csv is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
-- If no ASN entry is found for an IP, "notfound" is used for ASN and organization values.
-- CSV ASN database format (header: network,autonomous_system_number,autonomous_system_organization):
-  - network: Single IPv4/IPv6 address (e.g., 1.1.1.1, 2001:db8::1) or CIDR network (e.g., 192.168.1.0/24). Single IPs take precedence over CIDR matches.
-  - Example:
-    1.1.1.1,13335,Cloudflare
-    2001:db8::1,15169,Google
-    192.168.1.0/24,13335,Cloudflare
-- YAML config example:
-  # Main settings
-  metrics_port: 8080  # Prometheus port
-  disable_golang_metrics: false  # Disable Go runtime metrics
-  db_path: /tmp/asn.csv
-  log_file: /tmp/tracer.log  # Log output file
-  db_update_interval: 24h  # Update check interval
-  db_update_source: https://example.com/asn.csv
-  targets:
-    - host: 1.1.1.1  # Cloudflare DNS
-      schedule: "@every 300s"
-`
-		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
-			log.Printf("Failed to write usage notes: %v", err)
-			os.Exit(1)
-		}
-	}
+func (h *DBHolder) Set(reader *geoip2.Reader) {
+	h.reader.Store(reader)
 }
 
 func main() {
 	flag.Parse()
+
+	// Log initialization with version
+	log.Printf("Initializing tracer v%[1]s", version)
 
 	// Get executable directory
 	exePath, err := os.Executable()
@@ -202,6 +186,7 @@ func main() {
 	logFileValue := *logFile
 	dbUpdateIntervalValue := *dbUpdateInterval
 	dbUpdateSourceValue := *dbUpdateSource
+	maxmindLicenseKeyValue := *maxmindLicenseKey
 
 	// Handle no arguments: use default_config.yaml
 	if len(flag.Args()) == 0 && configPathValue == "" {
@@ -222,33 +207,36 @@ func main() {
 
 	// Apply config.yaml settings if not overridden by flags
 	if config != nil {
-		if dbPathValue == "" {
+		if dbPathValue == "" && config.DBPath != "" {
 			dbPathValue = config.DBPath
 		}
-		if logFileValue == "" {
+		if logFileValue == "" && config.LogFile != "" {
 			logFileValue = config.LogFile
 		}
-		if metricsPortValue == 8080 {
+		if metricsPortValue == 8080 && config.MetricsPort != 0 {
 			metricsPortValue = config.MetricsPort
 		}
-		if !disableGolangMetricsValue {
+		if !disableGolangMetricsValue && config.DisableGolangMetrics {
 			disableGolangMetricsValue = config.DisableGolangMetrics
 		}
 		if dbUpdateIntervalValue == 0 && config.DBUpdateInterval != "" {
-			if duration, err := time.ParseDuration(config.DBUpdateInterval); err != nil {
-				log.Printf("invalid db_update_interval in config: %v", err)
-			} else {
+			if duration, err := time.ParseDuration(config.DBUpdateInterval); err == nil {
 				dbUpdateIntervalValue = duration
+			} else {
+				log.Printf("invalid db_update_interval in config: %v", err)
 			}
 		}
-		if dbUpdateSourceValue == "" {
+		if dbUpdateSourceValue == "" && config.DBUpdateSource != "" {
 			dbUpdateSourceValue = config.DBUpdateSource
+		}
+		if maxmindLicenseKeyValue == "" && config.MaxmindLicenseKey != "" {
+			maxmindLicenseKeyValue = config.MaxmindLicenseKey
 		}
 	}
 
 	// Set default dbPath if still empty
 	if dbPathValue == "" {
-		dbPathValue = filepath.Join(exeDir, "asn.csv")
+		dbPathValue = filepath.Join(exeDir, "GeoLite2-ASN.mmdb")
 	}
 
 	// Initialize logging
@@ -263,23 +251,23 @@ func main() {
 		log.SetOutput(os.Stdout)
 	}
 
-	// Initialize CSV ASN database
+	// Initialize MaxMind database
 	dbHolder := &DBHolder{}
 	var dbInitiallyUnavailable bool
-	db, err := loadCSVDatabase(dbPathValue)
+	db, err := geoip2.Open(dbPathValue)
 	if err != nil {
-		log.Printf("Failed to open CSV ASN database at %s: %v; continuing with ASN values as 'unavailable'", dbPathValue, err)
+		log.Printf("Failed to open GeoLite2-ASN.mmdb at %s: %v; continuing with ASN values as 'unavailable'", dbPathValue, err)
 		dbHolder.Set(nil)
 		dbInitiallyUnavailable = true
 		// Attempt to download database if update source is configured
-		if dbUpdateSourceValue != "" {
-			log.Printf("Attempting to download CSV ASN database from %s", dbUpdateSourceValue)
-			if newDB, err := loadNewDatabase(dbUpdateSourceValue, dbPathValue); err == nil {
+		if dbUpdateSourceValue != "" && maxmindLicenseKeyValue != "" {
+			log.Printf("Attempting to download GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
+			if newDB, err := loadNewDatabase(dbUpdateSourceValue, maxmindLicenseKeyValue, dbPathValue); err == nil {
 				dbHolder.Set(newDB)
-				log.Printf("Successfully loaded initial CSV ASN database from %s", dbUpdateSourceValue)
+				log.Printf("Successfully loaded initial GeoLite2-ASN.mmdb from %s", dbUpdateSourceValue)
 				dbInitiallyUnavailable = false
 			} else {
-				log.Printf("Failed to download initial CSV ASN database: %v", err)
+				log.Printf("Failed to download initial GeoLite2-ASN.mmdb: %v", err)
 			}
 		}
 	} else {
@@ -306,7 +294,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if dbUpdateIntervalValue > 0 && dbUpdateSourceValue != "" {
-		go updateDatabase(ctx, dbHolder, dbPathValue, dbUpdateSourceValue, dbUpdateIntervalValue, &dbInitiallyUnavailable)
+		go updateDatabase(ctx, dbHolder, dbPathValue, dbUpdateSourceValue, maxmindLicenseKeyValue, dbUpdateIntervalValue, &dbInitiallyUnavailable)
 	}
 
 	// Create scheduler
@@ -381,7 +369,7 @@ func main() {
 		}
 	})
 	scheduler.Start()
-	log.Printf("tracer v0.7.0 starting, listening on %s", listenAddr)
+	log.Printf("tracer v%[1]s starting. Metrics served on %s", version, listenAddr)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
@@ -431,18 +419,18 @@ func loadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
-// lookupASN queries the CSV ASN database for ASN and organization
-func lookupASN(db *ASNDB, host string) (string, string) {
+// lookupASN queries the MaxMind database for ASN and organization
+func lookupASN(db *geoip2.Reader, host string) (string, string) {
 	if db == nil {
-		log.Printf("CSV ASN database is unavailable for host %s; returning 'unavailable'", host)
+		log.Printf("MaxMind database is not available for host %s; using 'unavailable' as ASN Value", host)
 		return "unavailable", "unavailable"
 	}
 	ipStr := host
 	if net.ParseIP(host) == nil {
 		ips, err := net.LookupIP(host)
 		if err != nil || len(ips) == 0 {
-			log.Printf("Failed to resolve hostname %s: %v; returning 'notfound'", host, err)
-			return "notfound", "notfound"
+			log.Printf("Failed to resolve hostname %s: %v; using 'unavailable' as ASN Value", host, err)
+			return "unavailable", "unavailable"
 		}
 		for _, ip := range ips {
 			if ip.To4() != nil {
@@ -457,156 +445,82 @@ func lookupASN(db *ASNDB, host string) (string, string) {
 
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		log.Printf("Invalid IP after resolution: %s; returning 'notfound'", ipStr)
-		return "notfound", "notfound"
+		log.Printf("Invalid IP after resolution: %s; using 'unavailable' as ASN Value", ipStr)
+		return "unavailable", "unavailable"
 	}
 
-	// Check for exact IP match first
-	for _, entry := range db.Entries {
-		if entry.IsSingleIP && entry.Network.IP.String() == ipStr {
-			return "AS" + entry.ASN, entry.Org
-		}
+	record, err := db.ASN(ip)
+	if err != nil {
+		log.Printf("ASN lookup failed for %s: %v; using 'unavailable' as ASN Value", ipStr, err)
+		return "unavailable", "unavailable"
 	}
 
-	// Fallback to longest prefix match for CIDR networks
-	var bestMatch *ASNEntry
-	var bestPrefixLen int
-	for _, entry := range db.Entries {
-		if !entry.IsSingleIP && entry.Network.Contains(ip) {
-			_, bits := entry.Network.Mask.Size()
-			if bestMatch == nil || bits > bestPrefixLen {
-				bestMatch = &entry
-				bestPrefixLen = bits
-			}
-		}
+	asn := fmt.Sprintf("AS%d", record.AutonomousSystemNumber)
+	org := record.AutonomousSystemOrganization
+	if org == "" {
+		org = "unavailable"
 	}
-
-	if bestMatch == nil {
-		log.Printf("No ASN match found for %s; returning 'notfound'", ipStr)
-		return "notfound", "notfound"
-	}
-
-	return "AS" + bestMatch.ASN, bestMatch.Org
+	return asn, org
 }
 
-// loadCSVDatabase loads the CSV ASN database from a file.
-func loadCSVDatabase(path string) (*ASNDB, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open CSV file %s: %w", path, err)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CSV file %s: %w", path, err)
-	}
-
-	if len(records) < 1 {
-		return nil, fmt.Errorf("CSV file %s is empty", path)
-	}
-
-	header := records[0]
-	if len(header) != 3 || header[0] != "network" || header[1] != "autonomous_system_number" || header[2] != "autonomous_system_organization" {
-		return nil, fmt.Errorf("invalid CSV header in %s; expected 'network,autonomous_system_number,autonomous_system_organization'", path)
-	}
-
-	var db ASNDB
-	for i, record := range records[1:] {
-		if len(record) != 3 {
-			log.Printf("Skipping invalid CSV record at line %d: %v", i+2, record)
-			continue
-		}
-		var network *net.IPNet
-		isSingleIP := false
-		if strings.Contains(record[0], "/") {
-			_, network, err = net.ParseCIDR(record[0])
-			if err != nil {
-				log.Printf("Skipping invalid network %s at line %d: %v", record[0], i+2, err)
-				continue
-			}
-		} else {
-			ip := net.ParseIP(record[0])
-			if ip == nil {
-				log.Printf("Skipping invalid IP %s at line %d: invalid IP address", record[0], i+2)
-				continue
-			}
-			isSingleIP = true
-			var ipNet *net.IPNet
-			if ip.To4() != nil {
-				_, ipNet, err = net.ParseCIDR(record[0] + "/32")
-			} else {
-				_, ipNet, err = net.ParseCIDR(record[0] + "/128")
-			}
-			if err != nil {
-				log.Printf("Skipping invalid IP %s at line %d: %v", record[0], i+2, err)
-				continue
-			}
-			network = ipNet
-		}
-		db.Entries = append(db.Entries, ASNEntry{
-			Network:    network,
-			IsSingleIP: isSingleIP,
-			ASN:        record[1],
-			Org:        record[2],
-		})
-	}
-
-	if len(db.Entries) == 0 {
-		return nil, fmt.Errorf("no valid entries in CSV file %s", path)
-	}
-
-	return &db, nil
-}
-
-// updateDatabase periodically checks for and applies CSV database updates.
-func updateDatabase(ctx context.Context, dbHolder *DBHolder, dbPath, source string, interval time.Duration, dbInitiallyUnavailable *bool) {
+// updateDatabase periodically checks for and applies database updates.
+func updateDatabase(ctx context.Context, dbHolder *DBHolder, dbPath, source, licenseKey string, interval time.Duration, dbInitiallyUnavailable *bool) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Stopping CSV ASN database updates")
+			log.Println("Stopping MaxMind database updates")
 			return
 		case <-ticker.C:
-			log.Printf("Starting CSV ASN database update check at %s", time.Now().Format(time.RFC3339))
-			newDB, err := loadNewDatabase(source, dbPath)
+			log.Printf("Starting MaxMind database update check at %s", time.Now().Format(time.RFC3339))
+			newDB, err := loadNewDatabase(source, licenseKey, dbPath)
 			if err != nil {
-				log.Printf("Failed to update CSV ASN database from %s: %v", source, err)
+				log.Printf("Failed to update MaxMind database from %s: %v", source, err)
 				dbUpdateStatus.WithLabelValues("failure", source).Set(0)
 				continue
 			}
+			oldDB := dbHolder.Get()
 			dbHolder.Set(newDB)
 			if *dbInitiallyUnavailable {
-				log.Printf("CSV ASN database successfully downloaded from %s at %s", source, time.Now().Format(time.RFC3339))
+				log.Printf("GeoLite2-ASN.mmdb successfully downloaded from %s at %s", source, time.Now().Format(time.RFC3339))
 				*dbInitiallyUnavailable = false
 			} else {
-				log.Printf("Successfully updated CSV ASN database from %s at %s", source, time.Now().Format(time.RFC3339))
+				log.Printf("Successfully updated MaxMind database from %s at %s", source, time.Now().Format(time.RFC3339))
 			}
 			dbUpdateStatus.WithLabelValues("success", source).Set(1)
+			if oldDB != nil {
+				if err := oldDB.Close(); err != nil {
+					log.Printf("Failed to close old MaxMind database: %v", err)
+				}
+			}
 		}
 	}
 }
 
-// loadNewDatabase loads a new CSV ASN database from a local file or URL.
-func loadNewDatabase(source, dbPath string) (*ASNDB, error) {
+// loadNewDatabase loads a new MaxMind database from a local file or URL.
+func loadNewDatabase(source, licenseKey, dbPath string) (*geoip2.Reader, error) {
+	var data []byte
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		// Download from MaxMind API
+		if licenseKey == "" {
+			return nil, fmt.Errorf("missing MaxMind license key for URL source")
+		}
 		resp, err := http.Get(source)
 		if err != nil {
-			return nil, fmt.Errorf("failed to download CSV from %s: %w", source, err)
+			return nil, fmt.Errorf("failed to download database from %s: %w", source, err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("unexpected status code %d downloading CSV from %s", resp.StatusCode, source)
+			return nil, fmt.Errorf("unexpected status code %d downloading database from %s", resp.StatusCode, source)
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CSV from %s: %w", source, err)
+			return nil, fmt.Errorf("failed to read database from %s: %w", source, err)
 		}
 		// Save to temporary file
-		tmpFile, err := os.CreateTemp("", "asn-*.csv")
+		tmpFile, err := os.CreateTemp("", "GeoLite2-ASN-*.mmdb")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temp file: %w", err)
 		}
@@ -617,25 +531,24 @@ func loadNewDatabase(source, dbPath string) (*ASNDB, error) {
 			}
 			return nil, fmt.Errorf("failed to write temp file: %w", err)
 		}
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("Failed to close temp file: %v", err)
-			return nil, fmt.Errorf("failed to close temp file: %w", err)
-		}
-		// Load from temp file
-		db, err := loadCSVDatabase(tmpFile.Name())
+		tmpFile.Close() // Close without checking error to avoid unused err
+		db, err := geoip2.Open(tmpFile.Name())
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse CSV database: %w", err)
+			return nil, fmt.Errorf("failed to open new database: %w", err)
 		}
 		// Move temp file to dbPath
 		if err := os.Rename(tmpFile.Name(), dbPath); err != nil {
-			return nil, fmt.Errorf("failed to move new CSV database to %s: %w", dbPath, err)
+			if closeErr := db.Close(); closeErr != nil {
+				log.Printf("Failed to close database after rename error: %v", closeErr)
+			}
+			return nil, fmt.Errorf("failed to move new database to %s: %w", dbPath, err)
 		}
 		return db, nil
 	} else {
 		// Load from local file
-		db, err := loadCSVDatabase(source)
+		db, err := geoip2.Open(source)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load CSV database from %s: %w", source, err)
+			return nil, fmt.Errorf("failed to open database from %s: %w", source, err)
 		}
 		return db, nil
 	}

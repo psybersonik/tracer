@@ -21,10 +21,10 @@ type MTRJob struct {
 }
 
 // NewMTRJob creates a new MTR job with ASN lookup function.
-func NewMTRJob(args []string, lookup func(string) (string, string)) *MTRJob {
+func NewMTRJob(args []string, asnFunc func(string) (string, string)) *MTRJob {
 	target := args[len(args)-1]
 	return &MTRJob{
-		runner:  mtr.NewRunner(args, lookup),
+		runner:  mtr.NewRunner(args, asnFunc),
 		metrics: mtr.NewCollector(),
 		target:  target,
 	}
