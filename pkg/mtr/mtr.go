@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/netip"
 	"os/exec"
 )
 
@@ -20,16 +21,17 @@ type MTRReportWrapper struct {
 
 // Hop represents a single hop in an MTR report.
 type Hop struct {
-	Host         string  `json:"host"`
-	LossPercent  float64 `json:"Loss%"`
-	Sent         int     `json:"Snt"`
-	Last         float64 `json:"Last"`
-	Avg          float64 `json:"Avg"`
-	Best         float64 `json:"Best"`
-	Wrst         float64 `json:"Wrst"`
-	StdDev       float64 `json:"StDev"`
-	ASN          string
-	Organization string
+	Host          string  `json:"host"`
+	LossPercent   float64 `json:"Loss%"`
+	Sent          int     `json:"Snt"`
+	Last          float64 `json:"Last"`
+	Avg           float64 `json:"Avg"`
+	Best          float64 `json:"Best"`
+	Wrst          float64 `json:"Wrst"`
+	StdDev        float64 `json:"StDev"`
+	ASN           string
+	Organization  string
+	IsFirstPublic bool // New field to mark first public IP
 }
 
 // Runner executes MTR and collects reports.
@@ -69,14 +71,24 @@ func (r *Runner) Run(ctx context.Context) (Report, error) {
 	report := wrapper.Report
 	log.Printf("MTR report parsed: %d hops", len(report.Hops))
 
+	// Track whether we've encountered the first public IP
+	firstPublic := true
 	for i := range report.Hops {
-		if report.Hops[i].Host != "" && report.Hops[i].Host != "???" {
-			asn, org := r.asnFunc(report.Hops[i].Host)
-			report.Hops[i].ASN = asn
-			report.Hops[i].Organization = org
-		} else {
+		if report.Hops[i].Host == "" || report.Hops[i].Host == "???" {
+			report.Hops[i].Host = "x.x.x.x"
 			report.Hops[i].ASN = "unknown"
 			report.Hops[i].Organization = "unknown"
+			continue
+		}
+		asn, org := r.asnFunc(report.Hops[i].Host)
+		report.Hops[i].ASN = asn
+		report.Hops[i].Organization = org
+
+		// Mark first public IP
+		ip, err := netip.ParseAddr(report.Hops[i].Host)
+		if err == nil && !ip.IsPrivate() && firstPublic {
+			report.Hops[i].IsFirstPublic = true
+			firstPublic = false
 		}
 	}
 

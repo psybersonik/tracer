@@ -160,12 +160,18 @@ The MaxMind GeoLite2-ASN.mmdb database is used for ASN lookups and is loaded int
     - `latency_jitter`: Average variance of latency across matching hops in consecutive reports.
       Value is 1 if metrics are reported, 0 otherwise.
 - `mtr_maxmind_db_update_status{status, source}`: Status of MaxMind GeoLite2-ASN.mmdb updates (1 for success, 0 for failure).
+- The `hop` label indicates the hop type:
+    - `"first"`: First hop in the traceroute.
+    - `"perimeter"`: First hop with a public IP address.
+    - `"intermediate"`: Middle hops not marked as `first`, `perimeter`, or `last`.
+    - `"last"`: Final hop in the traceroute.
 
 Example:
 ```
-mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="10.196.255.74",asn="unavailable",org="unavailable"} 0.1
-mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="203.0.113.1",asn="unavailable",org="unavailable"} 0.05
+mtr_hop_loss_ratio{target="1.1.1.1",hop="first",ip="10.196.255.74",asn="unavailable",org="unavailable"} 0.1
+mtr_hop_loss_ratio{target="1.1.1.1",hop="perimeter",ip="203.0.113.1",asn="unavailable",org="unavailable"} 0.05
 mtr_hop_loss_ratio{target="1.1.1.1",hop="last",ip="one.one.one.one",asn="AS13335",org="Cloudflare"} 0
+mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="x.x.x.x",asn="unknown",org="unknown"} 0.2
 mtr_route_volatility{target="1.1.1.1",route_changed="false",hop_count_variance="0.25",latency_jitter="1.50"} 1
 mtr_maxmind_db_update_status{status="success",source="https://download.maxmind.com/..."} 1
 mtr_report_duration_ms{target="1.1.1.1"} 16279

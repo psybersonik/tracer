@@ -86,6 +86,9 @@ func (j *MTRJob) Run(ctx context.Context) error {
 		} else if i == len(report.Hops)-1 {
 			hopType = "last"
 		}
+		if hop.IsFirstPublic {
+			hopType = "perimeter"
+		}
 		hub := mtr.Hub{
 			Target:       j.target,
 			Hop:          hopType,
@@ -161,7 +164,7 @@ func calculateLatencyJitter(reports []mtr.Report) float64 {
 	var sum, count float64
 	for _, currHop := range current.Hops {
 		for _, prevHop := range previous.Hops {
-			if currHop.Host == prevHop.Host && currHop.Host != "" && currHop.Host != "???" {
+			if currHop.Host == prevHop.Host && currHop.Host != "" && currHop.Host != "x.x.x.x" {
 				diff := currHop.Avg - prevHop.Avg
 				sum += diff * diff
 				count++
