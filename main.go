@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/shlex"
 	"github.com/oschwald/geoip2-golang"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -47,56 +46,6 @@ var (
 		Help: "Status of MaxMind GeoLite2-ASN.mmdb update (1 for success, 0 for failure)",
 	}, []string{"status", "source"})
 )
-
-func init() {
-	flag.Usage = func() {
-		usage := `tracer v%[1]s
-
-Usage: %[2]s [flags] [-- MTR arguments]
-
-tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
-MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
-Requests to other paths redirect to /metrics.
-Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
-If no arguments are provided, uses default_config.yaml in the executable directory.
-Command-line flags override config.yaml settings.
-Example: %[2]s -config=config.yaml
-Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
-Example: %[2]s
-
-Flags:
-`
-		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
-			log.Printf("Failed to write usage message: %v", err)
-		}
-		flag.PrintDefaults()
-		notes := `
-Notes:
-- If -config is set, MTR arguments are ignored.
-- If no arguments are provided, default_config.yaml must exist in the executable directory.
-- Logs are written to stdout unless -log-file or config.yaml log_file is set.
-- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
-- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
-- MaxMind DB updates require a valid license key for API downloads.
-- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
-- YAML config example:
-  # Main settings
-  metrics_port: 8080  # Prometheus port
-  disable_golang_metrics: false  # Disable Go runtime metrics
-  db_path: /tmp/GeoLite2-ASN.mmdb
-  log_file: /tmp/tracer.log  # Log output file
-  db_update_interval: 24h  # Update check interval
-  db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
-  maxmind_license_key: YOUR_KEY  # Example: ${MAXMIND_LICENSE_KEY:your_default_key}
-  targets:
-    - host: 1.1.1.1  # Cloudflare DNS
-      schedule: "@every 300s"
-`
-		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
-			log.Printf("Failed to write usage notes: %v", err)
-		}
-	}
-}
 
 // Config defines the YAML structure for settings and targets.
 type Config struct {
@@ -163,6 +112,58 @@ func (h *DBHolder) Get() *geoip2.Reader {
 
 func (h *DBHolder) Set(reader *geoip2.Reader) {
 	h.reader.Store(reader)
+}
+
+func init() {
+	flag.Usage = func() {
+		usage := `tracer v%[1]s
+
+Usage: %[2]s [flags] [-- MTR arguments]
+
+tracer runs MTR (My Traceroute) and exposes network metrics for Prometheus.
+MTR metrics are available at /metrics; Go runtime metrics at /metrics/golang (unless disabled).
+Requests to other paths redirect to /metrics.
+Use a YAML config file (-config) for settings and multiple targets or specify a single target via MTR arguments.
+If no arguments are provided, uses default_config.yaml in the executable directory.
+Command-line flags override config.yaml settings.
+Example: %[2]s -config=config.yaml
+Example: %[2]s -metrics-port=9090 -schedule="@every 10s" -log-file=/tmp/tracer.log -- 1.1.1.1
+Example: %[2]s
+
+Flags:
+`
+		if _, err := fmt.Fprintf(os.Stderr, usage, version, os.Args[0]); err != nil {
+			log.Printf("Failed to write usage message: %v", err)
+			os.Exit(1)
+		}
+		flag.PrintDefaults()
+		notes := `
+Notes:
+- If -config is set, MTR arguments are ignored.
+- If no arguments are provided, default_config.yaml must exist in the executable directory.
+- Logs are written to stdout unless -log-file or config.yaml log_file is set.
+- Schedule format supports cron (e.g., "0 * * * * *" for every minute) or @every <duration> (e.g., @every 10s).
+- YAML config supports # for comments and ${VARIABLE} or ${VARIABLE:default} for environment variable substitution.
+- MaxMind DB updates require a valid license key for API downloads.
+- If GeoLite2-ASN.mmdb is missing at startup, tracer continues with ASN values as "unavailable" until the database is available.
+- If no ASN entry is found or the organization is empty, "unavailable" is used for ASN and organization values.
+- YAML config example:
+  # Main settings
+  metrics_port: 8080  # Prometheus port
+  disable_golang_metrics: false  # Disable Go runtime metrics
+  db_path: /tmp/GeoLite2-ASN.mmdb
+  log_file: /tmp/tracer.log  # Log output file
+  db_update_interval: 24h  # Update check interval
+  db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
+  maxmind_license_key: YOUR_KEY  # Example: ${MAXMIND_LICENSE_KEY:your_default_key}
+  targets:
+    - host: 1.1.1.1  # Cloudflare DNS
+      schedule: "@every 300s"
+`
+		if _, err := fmt.Fprintf(os.Stderr, notes); err != nil {
+			log.Printf("Failed to write usage notes: %v", err)
+		}
+	}
 }
 
 func main() {
@@ -303,9 +304,12 @@ func main() {
 	// Load targets from config
 	if configPathValue != "" {
 		for _, target := range config.Targets {
-			mtrArgs, err := shlex.Split(target.Host)
-			if err != nil {
-				log.Printf("failed to parse args for %s: %v", target.Host, err)
+			if strings.ContainsAny(target.Host, "\"'") {
+				log.Printf("Warning: quoted arguments in host %q are not supported; splitting on whitespace", target.Host)
+			}
+			mtrArgs := strings.Fields(target.Host)
+			if len(mtrArgs) == 0 {
+				log.Printf("failed to parse args for %s: empty argument list", target.Host)
 				continue
 			}
 			mtrJob := job.NewMTRJob(mtrArgs, func(host string) (string, string) {
@@ -330,9 +334,12 @@ func main() {
 		}
 	} else if len(flag.Args()) > 0 {
 		// Fallback to single target from command line
-		mtrArgs, err := shlex.Split(flag.Args()[0])
-		if err != nil {
-			log.Fatalf("failed to parse mtr arguments: %v", err)
+		if strings.ContainsAny(flag.Args()[0], "\"'") {
+			log.Printf("Warning: quoted arguments in %q are not supported; splitting on whitespace", flag.Args()[0])
+		}
+		mtrArgs := strings.Fields(flag.Args()[0])
+		if len(mtrArgs) == 0 {
+			log.Fatalf("failed to parse mtr arguments: empty argument list")
 		}
 		mtrJob := job.NewMTRJob(mtrArgs, func(host string) (string, string) {
 			return lookupASN(dbHolder.Get(), host)

@@ -1,16 +1,18 @@
 # Tracer
 
-A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exposes network diagnostic metrics, enhanced with Autonomous System Number (ASN) information using a MaxMind GeoLite2 ASN database (version 0.7.0).
+**Version: 0.7.0**
+
+A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exposes network diagnostic metrics, enhanced with Autonomous System Number (ASN) information using a MaxMind GeoLite2-ASN database.
 
 ## Features
 
 - Runs MTR against single or multiple targets with configurable schedules.
-- Exposes Prometheus metrics for packet loss, latency, route volatility, MaxMind database update status, and more, with `target`, `hop`, `ip`, `asn`, and `org` labels.
-- Supports ASN lookups using a local `GeoLite2-ASN.mmdb` database, with fallback to "unavailable" if the database is unavailable.
-- Safely updates the MaxMind database in-line at configurable intervals, using local files or MaxMind API downloads, with success/failure metrics.
+- Exposes Prometheus metrics for packet loss, latency, route volatility, and database update status, with `target`, `hop`, `ip`, `asn`, and `org` labels.
+- Supports ASN lookups using a local MaxMind GeoLite2-ASN.mmdb database, loaded into memory, with fallback to "unavailable" if the database is unavailable or no ASN entry is found.
+- Safely updates the MaxMind database at configurable intervals, using local files or MaxMind API downloads, with success/failure metrics.
 - Configurable via command-line flags or YAML file (with `#` comment support and environment variable substitution).
 - Redirects non-`/metrics` HTTP requests to `/metrics` (and non-`/metrics/golang` if Go metrics enabled).
-- Logs to stdout or a specified file, including detailed MaxMind update events and a specific message when the database is first downloaded after being unavailable.
+- Logs to stdout or a specified file, including detailed database update events and version information.
 - Default configuration (`default_config.yaml`) used when no arguments are provided.
 - Option to disable Go runtime metrics.
 - Continues execution with ASN values as "unavailable" if `GeoLite2-ASN.mmdb` is missing, until the database is downloaded or provided.
@@ -21,8 +23,7 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
 
 - Go 1.21 or higher
 - MTR (My Traceroute) installed (`sudo apt install mtr` or equivalent)
-- MaxMind GeoLite2 ASN database (`GeoLite2-ASN.mmdb`, optional at startup; can be downloaded via `db_update_source`)
-- MaxMind license key (for API database downloads)
+- MaxMind GeoLite2-ASN.mmdb database (optional at startup; can be downloaded via `db_update_source` with a valid license key)
 
 ### Build
 
@@ -43,7 +44,7 @@ A Prometheus exporter for MTR (My Traceroute) that runs MTR periodically and exp
    go build -o tracer .
    ```
 
-4. Set MTR permissions (If raw socket access required):
+4. Set MTR permissions (if raw socket access required):
    ```bash
    sudo setcap cap_net_raw+ep /usr/bin/mtr
    sudo setcap cap_net_raw+ep ./tracer
@@ -86,11 +87,11 @@ View MTR metrics at `http://localhost:<metrics-port>/metrics` and Go runtime met
 - `-metrics-port int`: Port for Prometheus metrics HTTP endpoint (default: 8080).
 - `-disable-golang-metrics`: Disable Go runtime metrics endpoint (default: false).
 - `-config string`: Path to YAML config file defining settings and MTR targets (e.g., `config.yaml`).
-- `-db-path string`: Path to MaxMind `GeoLite2-ASN.mmdb` database (default: `GeoLite2-ASN.mmdb` in executable directory).
+- `-db-path string`: Path to MaxMind GeoLite2-ASN.mmdb database (default: `GeoLite2-ASN.mmdb` in executable directory).
 - `-log-file string`: Path to log file (default: stdout; overridden by `log_file` in config.yaml).
-- `-db-update-interval duration`: Interval to check for MaxMind database updates (e.g., `24h`; 0 disables updates).
-- `-db-update-source string`: Source for MaxMind database updates (local file path or MaxMind API URL, e.g., `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz`).
-- `-maxmind-license-key string`: MaxMind license key for API downloads.
+- `-db-update-interval duration`: Interval to check for MaxMind GeoLite2-ASN.mmdb updates (e.g., `24h`; 0 disables updates).
+- `-db-update-source string`: Source for MaxMind GeoLite2-ASN.mmdb updates (local file path or MaxMind API URL, e.g., `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz`).
+- `-maxmind-license-key string`: MaxMind license key for downloading GeoLite2-ASN.mmdb updates.
 - `-schedule string`: Cron schedule for single target (e.g., `@every 300s` or `0 * * * * *`) (default: `@every 1m`).
 - `-help`: Display help with usage and configuration details.
 
@@ -104,8 +105,8 @@ disable_golang_metrics: false  # Disable Go runtime metrics
 db_path: /tmp/GeoLite2-ASN.mmdb  # Path to MaxMind database
 log_file: /tmp/tracer.log  # Log output file
 db_update_interval: 24h  # Check for updates
-db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz  # MaxMind API URL
-maxmind_license_key: YOUR_KEY  # MaxMind license key
+db_update_source: https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key=YOUR_KEY&suffix=tar.gz
+maxmind_license_key: YOUR_KEY  # Example: ${MAXMIND_LICENSE_KEY:your_default_key}
 targets:
   - host: 1.1.1.1  # Cloudflare DNS
     schedule: "@every 300s"
@@ -134,6 +135,10 @@ targets:
 
 Environment variables can be substituted using `${VARIABLE}` or `${VARIABLE:default}` syntax. If a variable is unset and no default is provided, it resolves to an empty string, and a warning is logged.
 
+### MaxMind GeoLite2-ASN Database
+
+The MaxMind GeoLite2-ASN.mmdb database is used for ASN lookups and is loaded into memory at startup for efficient queries. Obtain it from MaxMind (requires a free account and license key). If the database is unavailable or no matching ASN entry is found, ASN and organization values are set to "unavailable".
+
 ### Metrics
 
 #### MTR Metrics (`/metrics`)
@@ -150,15 +155,16 @@ Environment variables can be substituted using `${VARIABLE}` or `${VARIABLE:defa
 - `mtr_report_loss{target}`: Overall loss ratio of the report.
 - `mtr_report_packets{target}`: Total packets sent in the report.
 - `mtr_route_volatility{target, route_changed, hop_count_variance, latency_jitter}`: Route volatility metrics:
-   - `route_changed`: "true" if hop sequence changed, "false" otherwise.
-   - `hop_count_variance`: Variance of hop counts across recent reports.
-   - `latency_jitter`: Average variance of latency across matching hops in consecutive reports.
-     Value is 1 if metrics are reported, 0 otherwise.
-- `mtr_maxmind_db_update_status{status, source}`: Status of MaxMind database updates (1 for success, 0 for failure).
+    - `route_changed`: "true" if hop sequence changed, "false" otherwise.
+    - `hop_count_variance`: Variance of hop counts across recent reports.
+    - `latency_jitter`: Average variance of latency across matching hops in consecutive reports.
+      Value is 1 if metrics are reported, 0 otherwise.
+- `mtr_maxmind_db_update_status{status, source}`: Status of MaxMind GeoLite2-ASN.mmdb updates (1 for success, 0 for failure).
 
 Example:
 ```
 mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="10.196.255.74",asn="unavailable",org="unavailable"} 0.1
+mtr_hop_loss_ratio{target="1.1.1.1",hop="intermediate",ip="203.0.113.1",asn="unavailable",org="unavailable"} 0.05
 mtr_hop_loss_ratio{target="1.1.1.1",hop="last",ip="one.one.one.one",asn="AS13335",org="Cloudflare"} 0
 mtr_route_volatility{target="1.1.1.1",route_changed="false",hop_count_variance="0.25",latency_jitter="1.50"} 1
 mtr_maxmind_db_update_status{status="success",source="https://download.maxmind.com/..."} 1
